@@ -1,10 +1,7 @@
-import { apiClient } from './client'
+import { apiClient, webClient } from './client'
 
-/** One ranked-list entry. The enrichment fields (CPR, first-candle,
- * directional, future-liquidity, momentum) only ever arrive on `intraday_boost`
- * and only once the server computes them -- the Desktop backend serves the base
- * four fields today and attaches the rest in a later follow-up, so each is
- * optional and simply absent until then. */
+/** One ranked-list entry. CPR/first-candle fields only ever arrive on
+ * `intraday_boost` -- the server enriches that list alone before responding. */
 export interface TfListItem {
   symbol: string
   ltp: number
@@ -14,20 +11,36 @@ export interface TfListItem {
   cpr_width_pct?: number | null
   cpr_bias?: 'bullish' | 'bearish' | null
   first_candle_range_pct?: number | null
-  /** Kaufman efficiency-ratio "steadiness since open", 0-100. */
+  /** Kaufman efficiency-ratio-based "steadiness since open" score, 0-100 --
+   * 100 is a perfectly straight move, near 0 is pure chop. Only ever
+   * populated on `intraday_boost`, refreshed every ~5 minutes server-side. */
   directional_score?: number | null
   directional_direction?: 'up' | 'down' | null
+  /** Sign flips in the candle-to-candle move since the open -- the concrete
+   * number behind "without hiccups." */
   directional_reversals?: number | null
-  /** How tradeable this stock's current-month future is right now. */
+  /** How tradeable this stock's current-month future is right now. An option
+   * tracks its future, so a wide or empty book there is what turns an exit
+   * into a wait. Read from the live book, refreshed ~60s; null outside market
+   * hours and for a stock with no listed future (`fut_symbol` null). */
   fut_symbol?: string | null
   fut_spread_pct?: number | null
   fut_spread_rs?: number | null
+  /** Rupees traded today, in crore -- comparable across contracts in a way raw
+   * volume is not, since lot size and price both vary. */
   fut_turnover_cr?: number | null
   fut_tier?: 'tight' | 'ok' | 'wide' | null
-  /** The chart's own Momentum Setup indicator, computed server-side. */
+  /** The chart's own Momentum Setup (option buying scalping
+   * setup) indicator, computed server-side against 5-minute candles so a
+   * signal shows up without that symbol's chart being open. `buy`/`sell`
+   * only while the setup's Continuous-mode trigger is 1 on the most
+   * recently closed candle; null once it stops firing, never left stale. */
   momentum_signal?: 'buy' | 'sell' | null
   momentum_signal_price?: number | null
   momentum_signal_bar_time?: string | null
+  /** How many times this direction fired since the scan window opened
+   * (previous trading day 15:15 IST through now) -- Continuous mode can
+   * fire more than once while a setup holds. */
   momentum_signal_count?: number | null
 }
 
@@ -35,21 +48,20 @@ export interface MarketPulseData {
   intraday_boost: TfListItem[]
   breakout_beacon: TfListItem[]
   high_powered_stocks: TfListItem[]
-  /** Distinct intraday_boost symbols that have fired a Momentum Setup signal so
-   * far today. Absent until the momentum enrichment lands server-side. */
+  /** Distinct intraday_boost symbols that have fired a Momentum Setup buy or
+   * sell signal so far today -- a same-session count, reset at the next
+   * server restart or IST date rollover. */
   momentum_signals_today?: number | null
 }
 
 export interface MarketPulseResponse {
   status: 'success' | 'error'
   data?: MarketPulseData
-  /** On `error` (e.g. no TradeFinder session configured), a trader-facing
-   * sentence naming the cause and the fix -- safe to surface verbatim. */
   message?: string
 }
 
-/** Raw TradeFinder field names, passed through unmapped except `symbol` which
- * the backend adds. `param_3` is rfactor everywhere it appears. */
+/** Raw TradeFinder field names, passed through unmapped except `symbol`/CPR
+ * which the backend adds. `param_3` is rfactor everywhere it appears. */
 export interface SectorIndexItem {
   Symbol: string
   param_3: number
@@ -78,14 +90,112 @@ export interface SectorScopeResponse {
   message?: string
 }
 
-/** Client for the TradeFinder proxy endpoints the Desktop backend serves today
- * (POST /api/v1/tfmarketpulse and /api/v1/tfsectorscope; apikey in the body).
- *
- * The fork's client also exposes background-settings, JWT-health, boost-snapshot
- * and boost-movement methods. Those backends are not yet in Desktop, so they are
- * intentionally left out here rather than shipped as calls that would 404 -- add
- * each method alongside the route that backs it. */
+export interface JwtHealthResponse {
+  status: 'success' | 'error'
+  hasToken?: boolean
+  expiresInSeconds?: number
+  refreshing?: boolean
+  message?: string
+}
+
+/** `[minute_of_day, rank]` pairs, already sorted by time. */
+export type RankTimelinePoint = [number, number]
+
+/** `[minute_of_day, ltp]` pairs, already sorted by time. */
+export type PriceTimelinePoint = [number, number]
+
+export interface BoostSnapshotsResponse {
+  status: 'success' | 'error'
+  date?: string
+  list_type?: string
+  count?: number
+  symbols?: string[]
+  /** Only present when `includeRanks` was set. Keyed by symbol, then by
+   * `YYYY-MM-DD` -- a single-day request still nests one day deep. */
+  ranks?: Record<string, Record<string, RankTimelinePoint[]>>
+  /** Only present when `includePrices` was set. Same shape as `ranks`. */
+  prices?: Record<string, Record<string, PriceTimelinePoint[]>>
+  message?: string
+}
+
+/** One symbol's current-day rank-movement state, from the backend engine
+ * (/boostmovement). Mirrors services/tf_rank_movement_service.compute_symbol_movement. */
+export interface BoostMovementRow {
+  symbol: string
+  observations: number
+  current_rank: number
+  previous_rank: number | null
+  first_seen_rank: number
+  best_rank: number
+  worst_rank: number
+  rank_delta: number | null
+  rank_change_since_first_seen: number
+  rank_velocity: number | null
+  rank_acceleration: number | null
+  top5: boolean
+  top10: boolean
+  top20: boolean
+  top10_entries: number
+  sustained_top5: boolean
+  sustained_top10: boolean
+  sustained_top20: boolean
+  zone_low: number | null
+  zone_high: number | null
+  is_stable_zone: boolean
+  event: string
+  event_priority: number
+  /** False when the symbol is missing from the latest snapshot: rank and
+   * trajectory are last-known, and `event` is ABSENT so nothing badges or
+   * alerts on a move that stopped hours ago. Optional -- an older backend
+   * omits it, and the badge map simply has no entry for ABSENT either way. */
+  present?: boolean
+  minutes_since_last_seen?: number
+  /** Phase 2 directional run: the current move measured from the turn it began
+   * at, not from the open. `run_efficiency` is the move divided by the deepest
+   * pullback since -- how much it has given back. Null on an older backend or
+   * before there are enough price rows. */
+  run_direction?: 'up' | 'down' | null
+  run_move_pct?: number | null
+  run_adverse_pct?: number | null
+  run_efficiency?: number | null
+  run_minutes?: number | null
+  run_from_min?: number | null
+  run_clean?: boolean
+  /** The stock's actual move against yesterday's close. Shown beside the run so
+   * the two are never confused: travelling 10 points down from a spiked opening
+   * print is not a 10% fall. */
+  day_change_pct?: number | null
+}
+
+export interface BoostMovementResponse {
+  status: 'success' | 'error'
+  list_type?: string
+  count?: number
+  symbols?: BoostMovementRow[]
+  message?: string
+}
+
+/** TradeFinder's background work: the 30-second snapshot and the history it
+ * fetches for the badges. Switched from the panel, applied at once. */
+export interface TfBackgroundSetting {
+  status: 'success' | 'error'
+  background_enabled?: boolean
+  message?: string
+}
+
 export const tradefinderApi = {
+  getBackgroundSetting: async (): Promise<TfBackgroundSetting> => {
+    const response = await webClient.get<TfBackgroundSetting>('/trading/tradefinder/settings')
+    return response.data
+  },
+
+  setBackgroundSetting: async (on: boolean): Promise<TfBackgroundSetting> => {
+    const response = await webClient.post<TfBackgroundSetting>('/trading/tradefinder/settings', {
+      background_enabled: on,
+    })
+    return response.data
+  },
+
   getMarketPulse: async (apiKey: string): Promise<MarketPulseResponse> => {
     const response = await apiClient.post<MarketPulseResponse>('/tfmarketpulse', {
       apikey: apiKey,
@@ -96,6 +206,50 @@ export const tradefinderApi = {
   getSectorScope: async (apiKey: string): Promise<SectorScopeResponse> => {
     const response = await apiClient.post<SectorScopeResponse>('/tfsectorscope', {
       apikey: apiKey,
+    })
+    return response.data
+  },
+
+  /** Cheap expiry check -- only kicks off the slow browser-based refresh
+   * server-side when the token is actually close to expiring. Safe to poll
+   * every minute or two, per the endpoint's own docstring. */
+  getJwtHealth: async (apiKey: string): Promise<JwtHealthResponse> => {
+    const response = await apiClient.post<JwtHealthResponse>('/tfjwtkeepalive', {
+      apikey: apiKey,
+      minSeconds: 1800,
+    })
+    return response.data
+  },
+
+  /** Today's rank (and optionally price) timeline for one list -- the
+   * backtesting endpoint doubles as the only source of "how has this symbol's
+   * rank/price moved today", since nothing else records that history. */
+  getBoostSnapshots: async (
+    apiKey: string,
+    date: string,
+    listType: string,
+    opts: { includePrices?: boolean } = {}
+  ): Promise<BoostSnapshotsResponse> => {
+    const response = await apiClient.post<BoostSnapshotsResponse>('/boostsnapshots', {
+      apikey: apiKey,
+      date,
+      lookbackDays: 1,
+      list_type: listType,
+      includeRanks: true,
+      includePrices: opts.includePrices ?? false,
+    })
+    return response.data
+  },
+
+  /** Current-day rank-movement rows (delta, velocity, Top-N, sustained, event),
+   * reconstructed server-side from the snapshot history -- no upstream fetch. */
+  getBoostMovement: async (
+    apiKey: string,
+    listType: string = 'intraday_boost'
+  ): Promise<BoostMovementResponse> => {
+    const response = await apiClient.post<BoostMovementResponse>('/boostmovement', {
+      apikey: apiKey,
+      list_type: listType,
     })
     return response.data
   },
