@@ -243,6 +243,7 @@ mod writer_flow_oi;
 mod signals;
 mod screener;
 mod tradefinder;
+mod tf_boost;
 // The built-in ngrok tunnel in the app (services::tunnel, server::tunnel).
 mod tunnel;
 // The Agent's configuration routes (the config part of blueprints/agent.py).

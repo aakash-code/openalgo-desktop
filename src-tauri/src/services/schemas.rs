@@ -797,6 +797,11 @@ schema!(
 // so both are read from the raw body and the rest is excluded here.
 schema!(nse_events, Schema::new(vec![apikey()]).exclude_unknown());
 
+// TradeFinder Boost queries validate only the apikey; `date`, `list_type`,
+// `includeRanks` and `includePrices` are read from the raw body (the service
+// defaults each), so the rest is excluded here.
+schema!(tf_boost_query, Schema::new(vec![apikey()]).exclude_unknown());
+
 schema!(
     signal_ingest,
     Schema::new(vec![
