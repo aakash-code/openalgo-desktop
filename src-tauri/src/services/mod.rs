@@ -98,6 +98,7 @@ pub mod strike_profile_service;
 pub mod symbol_service;
 pub mod system_info;
 pub mod telegram_admin_service;
+pub mod tf_rank_movement;
 pub mod tools_service;
 pub mod traffic_service;
 pub mod tunnel;
