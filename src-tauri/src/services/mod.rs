@@ -63,6 +63,7 @@ pub mod nse_events_service;
 pub mod obligations;
 pub mod oi_flow_analysis;
 pub mod oi_flow_db;
+pub mod oi_flow_recorder;
 pub mod options_order_service;
 pub mod options_service;
 pub mod order_log_service;

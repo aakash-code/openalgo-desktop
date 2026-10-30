@@ -225,6 +225,8 @@ async fn start_services(
     services::system_info::mark_start();
     services::monitor::start(ctx);
     services::health_service::start(ctx);
+    // Writer Flow per-minute OI recorder (opt-in: OI_FLOW_RECORDER_ENABLED).
+    services::oi_flow_recorder::start(ctx);
     // Sleep and wake: feeds reconnect and orders are checked (owned task).
     services::lifecycle::wake::start(ctx);
     let server = server::start(ctx.clone()).await.ok();
