@@ -348,8 +348,10 @@ pub fn expiry_for_day(underlying: &str, trade_date: NaiveDate) -> Result<Option<
 }
 
 /// A stored switch, or None when it was never set.
-pub fn read_setting(key: &str) -> Result<Option<String>> {
-    let Some(db) = handle() else { return Ok(None) };
+pub fn read_setting(ctx: &crate::state::AppState, key: &str) -> Result<Option<String>> {
+    // Settings persist independently of the recorder, so open the store on
+    // demand (idempotent -- the recorder shares the same handle).
+    let db = init(&ctx.data_dir)?;
     db.read(|c| {
         let v: Option<String> = c
             .query_row(
@@ -362,8 +364,8 @@ pub fn read_setting(key: &str) -> Result<Option<String>> {
     })
 }
 
-pub fn write_setting(key: &str, value: &str) -> Result<()> {
-    let Some(db) = handle() else { return Ok(()) };
+pub fn write_setting(ctx: &crate::state::AppState, key: &str, value: &str) -> Result<()> {
+    let db = init(&ctx.data_dir)?;
     let c = db.conn()?;
     c.execute(
         "INSERT OR REPLACE INTO oi_flow_settings (key, value) VALUES (?, ?)",

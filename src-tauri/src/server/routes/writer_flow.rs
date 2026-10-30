@@ -10,17 +10,58 @@
 //! line, never a code.
 
 use super::{Access, RouteSpec};
-use crate::server::routes::webui::ok;
+use crate::server::routes::webui::{ok, JsonBody};
 use crate::services::market_read_core::{build_read, ReadInputs};
-use crate::services::oi_flow_db::{available_sessions, load_day};
+use crate::services::oi_flow_db::{self, available_sessions, load_day};
 use crate::services::oi_levels::{build_levels, LevelInputs};
 use crate::services::writer_flow_service::{flow_answer, recorder_enabled, FlowView};
-use axum::{extract::Query, http::Method, response::Response, routing::get};
+use crate::state::AppState;
+use axum::{
+    extract::{Query, State},
+    http::Method,
+    response::Response,
+    routing::{get, post},
+};
 use chrono::NaiveDate;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 type Q = Query<HashMap<String, String>>;
+type Ctx = State<Arc<AppState>>;
+
+const READ_ENABLED: &str = "market_read_enabled";
+const READ_TELEGRAM: &str = "market_read_telegram";
+const READ_SOUND: &str = "market_read_sound";
+
+fn read_settings_json(ctx: &AppState) -> Value {
+    let on = |k: &str| oi_flow_db::read_setting(ctx, k).ok().flatten().as_deref() == Some("true");
+    json!({
+        "status": "success",
+        "read": on(READ_ENABLED),
+        "telegram": on(READ_TELEGRAM),
+        "sound": on(READ_SOUND),
+    })
+}
+
+/// GET /writerflow/api/read/settings -- the three Market Read switches.
+pub async fn api_read_settings_get(State(ctx): Ctx) -> Response {
+    ok(read_settings_json(&ctx))
+}
+
+/// POST /writerflow/api/read/settings -- set any of read / telegram / sound.
+pub async fn api_read_settings_post(State(ctx): Ctx, JsonBody(body): JsonBody) -> Response {
+    for (field, key) in [
+        ("read", READ_ENABLED),
+        ("telegram", READ_TELEGRAM),
+        ("sound", READ_SOUND),
+    ] {
+        if let Some(v) = body.get(field).and_then(Value::as_bool) {
+            let _ = oi_flow_db::write_setting(&ctx, key, if v { "true" } else { "false" });
+        }
+    }
+    ok(read_settings_json(&ctx))
+}
 
 pub fn table() -> Vec<RouteSpec> {
     vec![
@@ -47,6 +88,18 @@ pub fn table() -> Vec<RouteSpec> {
             method: Method::GET,
             access: Access::User,
             make: || get(api_read),
+        },
+        RouteSpec {
+            path: "/writerflow/api/read/settings",
+            method: Method::GET,
+            access: Access::User,
+            make: || get(api_read_settings_get),
+        },
+        RouteSpec {
+            path: "/writerflow/api/read/settings",
+            method: Method::POST,
+            access: Access::User,
+            make: || post(api_read_settings_post),
         },
     ]
 }
