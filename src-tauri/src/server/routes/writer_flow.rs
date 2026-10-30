@@ -11,7 +11,8 @@
 
 use super::{Access, RouteSpec};
 use crate::server::routes::webui::ok;
-use crate::services::oi_flow_db::available_sessions;
+use crate::services::oi_flow_db::{available_sessions, load_day};
+use crate::services::oi_levels::{build_levels, LevelInputs};
 use crate::services::writer_flow_service::{flow_answer, recorder_enabled, FlowView};
 use axum::{extract::Query, http::Method, response::Response, routing::get};
 use chrono::NaiveDate;
@@ -34,7 +35,66 @@ pub fn table() -> Vec<RouteSpec> {
             access: Access::User,
             make: || get(api_flow),
         },
+        RouteSpec {
+            path: "/writerflow/api/levels",
+            method: Method::GET,
+            access: Access::User,
+            make: || get(api_levels),
+        },
     ]
+}
+
+/// GET /writerflow/api/levels -- support/resistance zones, walls, touches and
+/// hold rates for the recorded day (Option Levels; gamma deferred).
+pub async fn api_levels(Query(q): Q) -> Response {
+    let underlying = arg(&q, "underlying").unwrap_or("").to_uppercase();
+    if underlying.is_empty() {
+        return ok(json!({"status": "error", "message": "Choose an underlying, such as NIFTY."}));
+    }
+    let expiry = arg(&q, "expiry").unwrap_or("").to_uppercase();
+    let day = arg(&q, "date").and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
+    let sessions = match available_sessions(10) {
+        Ok(s) => s,
+        Err(_) => return ok(json!({"status": "error", "message": READ_FAILED})),
+    };
+    let chosen = sessions
+        .into_iter()
+        .filter(|s| s.underlying == underlying)
+        .filter(|s| day.map(|d| s.trade_date == d.to_string()).unwrap_or(true))
+        .find(|s| expiry.is_empty() || s.expiry == expiry);
+    let Some(chosen) = chosen else {
+        return ok(json!({
+            "status": "empty",
+            "message": "Nothing recorded for this yet.",
+            "recorder_enabled": recorder_enabled(),
+        }));
+    };
+    let Ok(trade_date) = NaiveDate::parse_from_str(&chosen.trade_date, "%Y-%m-%d") else {
+        return ok(json!({"status": "error", "message": READ_FAILED}));
+    };
+    let samples = match load_day(&underlying, &chosen.expiry, trade_date) {
+        Ok(s) => s,
+        Err(_) => return ok(json!({"status": "error", "message": READ_FAILED})),
+    };
+    let inputs = LevelInputs {
+        underlying: underlying.clone(),
+        samples,
+        expiry_day: false,
+        past_touches: Vec::new(),
+    };
+    match build_levels(&inputs) {
+        Some(mut v) => {
+            if let Some(o) = v.as_object_mut() {
+                o.insert("status".into(), json!("success"));
+            }
+            ok(v)
+        }
+        None => ok(json!({
+            "status": "empty",
+            "message": "Not enough recorded yet to read levels.",
+            "recorder_enabled": recorder_enabled(),
+        })),
+    }
 }
 
 fn arg<'a>(q: &'a HashMap<String, String>, k: &str) -> Option<&'a str> {
