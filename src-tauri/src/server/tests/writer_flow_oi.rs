@@ -51,3 +51,12 @@ async fn writerflow_levels_answers_empty_without_a_recording() {
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["status"], json!("empty"), "{v}");
 }
+
+#[tokio::test]
+async fn writerflow_read_answers_empty_without_a_recording() {
+    let h = H::new();
+    h.setup();
+    let (s, v) = h.json(get_signed(&h, "/writerflow/api/read?underlying=NIFTY")).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["status"], json!("empty"), "{v}");
+}

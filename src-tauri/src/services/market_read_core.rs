@@ -15,6 +15,7 @@
 use crate::services::oi_flow_analysis::Sample;
 use chrono::NaiveDateTime;
 use serde::Serialize;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub const LAKH: f64 = 100_000.0;
@@ -389,6 +390,415 @@ fn role_static(role: &str) -> &'static str {
     }
 }
 
+// ---------------------------------------------------------------- market read
+//
+// The flow / levels / price readings of `build_read`, ported from
+// market_read/core.py. The futures, India-VIX, implied-volatility and churn
+// readings need live quote feeds + option greeks that are not wired yet, so
+// they are served as null (the panel renders them blank) -- the OI-driven
+// readings (who leads option writing, support/resistance, gaps/extremes) are
+// the portable, testable core.
+
+const FLOW_WINDOW: i64 = 10;
+const FLOW_SHARE: f64 = 0.01;
+const BALANCED_MINUTES: i64 = 10;
+const FLIP_SETTLE: i64 = 15;
+const GAP_SHARE: f64 = 0.003;
+const NEW_EXTREME_PAUSE: i64 = 15;
+const NEW_EXTREME_SHARE: f64 = 0.0002;
+
+fn round1(x: f64) -> f64 {
+    (x * 10.0).round() / 10.0
+}
+fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+fn iso(t: NaiveDateTime) -> String {
+    t.format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+fn tone_word(side: Option<&str>) -> i32 {
+    match side {
+        Some("put") => 1,
+        Some("call") => -1,
+        _ => 0,
+    }
+}
+
+struct FlowMinute {
+    time: NaiveDateTime,
+    ce: f64,
+    pe: f64,
+    band_oi: f64,
+}
+
+/// Call and put open-interest change near the money, minute by minute.
+fn flow(book: &Book) -> Vec<FlowMinute> {
+    let mut out = Vec::new();
+    for w in book.times.windows(2) {
+        let (prev, t) = (w[0], w[1]);
+        let now = &book.legs[&t];
+        let before = &book.legs[&prev];
+        let (mut ce, mut pe, mut band) = (0.0, 0.0, 0.0);
+        for k in near(book, &t, BAND_STEPS) {
+            for side in ["CE", "PE"] {
+                let key = (side_static(side), k.to_bits());
+                if let Some(leg) = now.get(&key) {
+                    band += leg.0;
+                    if let Some(was) = before.get(&key) {
+                        let change = leg.0 - was.0;
+                        if side == "CE" {
+                            ce += change;
+                        } else {
+                            pe += change;
+                        }
+                    }
+                }
+            }
+        }
+        out.push(FlowMinute { time: t, ce, pe, band_oi: band });
+    }
+    out
+}
+
+fn window_sum(v: &[f64], i: usize, n: i64) -> f64 {
+    let start = (i as i64 - n + 1).max(0) as usize;
+    v[start..=i].iter().sum()
+}
+
+struct Regime {
+    time: NaiveDateTime,
+    side: String,
+    since: NaiveDateTime,
+}
+
+/// Who leads the flow, held HOLD_MINUTES before it counts. Returns the changes
+/// plus the FLOW_WINDOW net flow and its threshold at every minute.
+fn regimes(flow: &[FlowMinute]) -> (Vec<Regime>, Vec<f64>, Vec<f64>) {
+    let net: Vec<f64> = flow.iter().map(|f| f.pe - f.ce).collect();
+    let mut changes: Vec<Regime> = Vec::new();
+    let mut current: Option<&str> = None;
+    let mut run_side: Option<&str> = None;
+    let mut run_start: Option<NaiveDateTime> = None;
+    let mut run_len = 0i64;
+    let mut quiet = 0i64;
+    let mut nets = Vec::new();
+    let mut thresholds = Vec::new();
+    for (i, f) in flow.iter().enumerate() {
+        let n = window_sum(&net, i, FLOW_WINDOW);
+        let threshold = FLOW_SHARE * f.band_oi;
+        nets.push(n);
+        thresholds.push(threshold);
+        let side = if n > threshold {
+            Some("put")
+        } else if n < -threshold {
+            Some("call")
+        } else {
+            None
+        };
+        match side {
+            None => {
+                run_side = None;
+                run_len = 0;
+                quiet += 1;
+                if !matches!(current, None | Some("balanced")) && quiet >= BALANCED_MINUTES {
+                    current = Some("balanced");
+                    changes.push(Regime {
+                        time: f.time,
+                        side: "balanced".into(),
+                        since: flow[i - quiet as usize + 1].time,
+                    });
+                }
+            }
+            Some(s) => {
+                quiet = 0;
+                if run_side == Some(s) {
+                    run_len += 1;
+                } else {
+                    run_side = Some(s);
+                    run_start = Some(f.time);
+                    run_len = 1;
+                }
+                if run_len >= HOLD_MINUTES && current != Some(s) {
+                    current = Some(s);
+                    changes.push(Regime {
+                        time: f.time,
+                        side: s.into(),
+                        since: run_start.unwrap(),
+                    });
+                }
+            }
+        }
+    }
+    (changes, nets, thresholds)
+}
+
+fn flow_events(
+    u: &str,
+    regimes: &[Regime],
+    flow: &[FlowMinute],
+    index_of: &HashMap<NaiveDateTime, usize>,
+) -> Vec<Event> {
+    let mut out = Vec::new();
+    let mut previous: Option<NaiveDateTime> = None;
+    let mut last_side: Option<String> = None;
+    for r in regimes {
+        let i = index_of[&r.time];
+        let start = (i as i64 - FLOW_WINDOW + 1).max(0) as usize;
+        let part = &flow[start..=i];
+        let ce: f64 = part.iter().map(|f| f.ce).sum();
+        let pe: f64 = part.iter().map(|f| f.pe).sum();
+        if r.side == "balanced" {
+            out.push(event(
+                "flow_balanced",
+                r.time,
+                INFO,
+                format!("Neither side leads {u} option writing"),
+                format!("No clear lead from puts or calls since {}.", hm(r.since)),
+                "",
+            ));
+            continue;
+        }
+        let writers = if r.side == "put" { "Put" } else { "Call" };
+        let settled = previous
+            .map(|p| (r.since - p) >= chrono::Duration::minutes(FLIP_SETTLE))
+            .unwrap_or(true);
+        let turned = last_side.as_deref() != Some(r.side.as_str());
+        previous = Some(r.since);
+        last_side = Some(r.side.clone());
+        let level = if settled && turned { MAJOR } else { INFO };
+        out.push(event(
+            &format!("flow_{}", r.side),
+            r.time,
+            level,
+            format!("{writers} writers took over {u}"),
+            format!(
+                "Since {}, near the money: put open interest {}, call {} in the last {FLOW_WINDOW} minutes.",
+                hm(r.since),
+                signed_lakh(pe),
+                signed_lakh(ce)
+            ),
+            "",
+        ));
+    }
+    out
+}
+
+fn price_events(u: &str, book: &Book, prev_close: Option<f64>) -> Vec<Event> {
+    let mut out = Vec::new();
+    let times = &book.times;
+    let open_ = book.spot[&times[0]];
+    if let Some(pc) = prev_close {
+        if (open_ - pc).abs() >= GAP_SHARE * pc {
+            let up = open_ > pc;
+            for t in &times[1..] {
+                let s = book.spot[t];
+                if (up && s <= pc) || (!up && s >= pc) {
+                    out.push(event(
+                        "gap_filled",
+                        *t,
+                        MAJOR,
+                        format!("{u} filled its opening gap"),
+                        format!(
+                            "Opened {:+.0} from the previous close of {pc:.0}, and is now back at {s:.0}.",
+                            open_ - pc
+                        ),
+                        "",
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+    let (mut high, mut low) = (open_, open_);
+    let (mut high_t, mut low_t) = (times[0], times[0]);
+    for t in &times[1..] {
+        let s = book.spot[t];
+        if s > high {
+            if (*t - high_t) >= chrono::Duration::minutes(NEW_EXTREME_PAUSE)
+                && s - high >= NEW_EXTREME_SHARE * high
+            {
+                out.push(event(
+                    "day_high",
+                    *t,
+                    INFO,
+                    format!("{u} made a new day high"),
+                    format!("{s:.0}, above the {high:.0} it made at {}.", hm(high_t)),
+                    "",
+                ));
+            }
+            high = s;
+            high_t = *t;
+        }
+        if s < low {
+            if (*t - low_t) >= chrono::Duration::minutes(NEW_EXTREME_PAUSE)
+                && low - s >= NEW_EXTREME_SHARE * low
+            {
+                out.push(event(
+                    "day_low",
+                    *t,
+                    INFO,
+                    format!("{u} made a new day low"),
+                    format!("{s:.0}, below the {low:.0} it made at {}.", hm(low_t)),
+                    "",
+                ));
+            }
+            low = s;
+            low_t = *t;
+        }
+    }
+    out
+}
+
+/// What one request asks of [`build_read`]. Live market quotes and option
+/// greeks are deferred, so the futures/volatility/IV readings stay null.
+pub struct ReadInputs {
+    pub underlying: String,
+    pub samples: Vec<Sample>,
+    pub prev_close: Option<f64>,
+}
+
+/// The read for the day so far, or None when fewer than two minutes are held.
+pub fn build_read(inputs: &ReadInputs) -> Option<Value> {
+    let book = book(&inputs.samples)?;
+    let u = inputs.underlying.as_str();
+    let flow = flow(&book);
+    let index_of: HashMap<NaiveDateTime, usize> =
+        flow.iter().enumerate().map(|(i, f)| (f.time, i)).collect();
+    let (regimes_v, nets, thresholds) = regimes(&flow);
+    let (lvl_events, levels) = level_events(&book, false);
+
+    let first = book.times[0];
+    let last_t = *book.times.last().unwrap();
+    let mut events = flow_events(u, &regimes_v, &flow, &index_of);
+    events.extend(lvl_events);
+    events.extend(price_events(u, &book, inputs.prev_close));
+    events.retain(|e| e.time >= first && e.time <= last_t);
+    events.sort_by(|a, b| {
+        (a.time, a.level != MAJOR, a.kind.clone()).cmp(&(b.time, b.level != MAJOR, b.kind.clone()))
+    });
+
+    let regime = regimes_v.last();
+    let net_last = nets.last().copied().unwrap_or(0.0);
+    let thr_last = thresholds.last().copied().unwrap_or(0.0);
+    let half = thr_last / 2.0;
+    let leaning = if net_last > half {
+        Some("put")
+    } else if net_last < -half {
+        Some("call")
+    } else {
+        None
+    };
+    let tail = &flow[flow.len().saturating_sub(FLOW_WINDOW as usize)..];
+    let flow_state = json!({
+        "side": regime.map(|r| r.side.clone()),
+        "leaning": leaning,
+        "since": regime.map(|r| hm(r.since)),
+        "net_lakh": round1(net_last / LAKH),
+        "threshold_lakh": round1(thr_last / LAKH),
+        "ce_lakh": round1(tail.iter().map(|f| f.ce).sum::<f64>() / LAKH),
+        "pe_lakh": round1(tail.iter().map(|f| f.pe).sum::<f64>() / LAKH),
+        "delta_net_lakh": Value::Null,
+        "tone": regime
+            .filter(|r| Some(r.side.as_str()) == leaning)
+            .map(|r| tone_word(Some(&r.side)))
+            .unwrap_or(0),
+    });
+
+    let legs = &book.legs[&last_t];
+    let level = |role: &str, side: &str| -> Value {
+        let Some(Some(k)) = levels.get(role_static(role)) else { return Value::Null };
+        let key = (side_static(side), k.to_bits());
+        let Some(leg) = legs.get(&key) else { return Value::Null };
+        let oi = leg.0;
+        let peak = book
+            .times
+            .iter()
+            .filter_map(|t| book.legs[t].get(&key).map(|l| l.0))
+            .fold(0.0_f64, f64::max);
+        json!({
+            "strike": k,
+            "oi_lakh": round1(oi / LAKH),
+            "peak_lakh": round1(peak / LAKH),
+            "from_peak_pct": if peak > 0.0 { round1((oi / peak - 1.0) * 100.0) } else { 0.0 },
+        })
+    };
+
+    let spot = book.spot[&last_t];
+    let day_high = book.spot.values().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let day_low = book.spot.values().cloned().fold(f64::INFINITY, f64::min);
+    let state = json!({
+        "flow": flow_state,
+        "futures": Value::Null,
+        "levels": {"support": level("support", "PE"), "resistance": level("resistance", "CE")},
+        "volatility": Value::Null,
+        "churn": Value::Null,
+        "others": {},
+        "price": {
+            "spot": round2(spot),
+            "open": round2(book.spot[&first]),
+            "prev_close": inputs.prev_close,
+            "day_high": round2(day_high),
+            "day_low": round2(day_low),
+        },
+    });
+    let series: Vec<Value> = flow
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            json!({
+                "time": iso(f.time),
+                "spot": round2(book.spot[&f.time]),
+                "net_lakh": round1(nets[i] / LAKH),
+                "threshold_lakh": round1(thresholds[i] / LAKH),
+            })
+        })
+        .collect();
+
+    Some(json!({
+        "underlying": u,
+        "minute": iso(last_t),
+        "headline": headline(u, &flow_state, &events),
+        "state": state,
+        "events": events,
+        "series": series,
+    }))
+}
+
+fn headline(u: &str, flow_state: &Value, events: &[Event]) -> String {
+    let side = flow_state.get("side").and_then(Value::as_str);
+    let leaning = flow_state.get("leaning").and_then(Value::as_str);
+    let since = flow_state.get("since").and_then(Value::as_str).unwrap_or("");
+    let mut head = match side {
+        Some("put") | Some("call") => {
+            let who = if side == Some("put") { "Put writers" } else { "Call writers" };
+            let mut s = format!("{who} lead {u} since {since}");
+            if let Some(l) = leaning {
+                if Some(l) != side {
+                    s.push_str(&format!(", but {l} writers are taking over"));
+                }
+            } else {
+                s.push_str(", fading");
+            }
+            s
+        }
+        _ => format!("Neither puts nor calls lead {u}"),
+    };
+    head.push('.');
+    let major: Vec<&Event> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind.as_str(),
+                "support_to_resistance" | "resistance_to_support" | "gap_filled"
+            )
+        })
+        .collect();
+    if let Some(last) = major.last() {
+        head.push_str(&format!(" {} at {}.", last.title, hm(last.time)));
+    }
+    head
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,5 +853,26 @@ mod tests {
         let (events, state) = level_events(&b, false);
         assert!(events.iter().any(|e| e.kind == "support_at"));
         assert_eq!(state["support"], Some(22900.0));
+    }
+
+    #[test]
+    fn build_read_reads_put_writers_leading() {
+        let mut v = Vec::new();
+        // Put open interest climbs near the money while calls stay flat: the
+        // flow should read put writers leading. Futures/VIX are deferred (null).
+        for m in 0..6 {
+            v.push(s(m, 22950.0, "PE", 500_000.0 + (m as f64) * 200_000.0, 22970.0));
+            v.push(s(m, 22900.0, "PE", 300_000.0, 22970.0));
+            v.push(s(m, 23000.0, "CE", 500_000.0, 22970.0));
+        }
+        let out = build_read(&ReadInputs {
+            underlying: "NIFTY".into(),
+            samples: v,
+            prev_close: None,
+        })
+        .expect("read");
+        assert_eq!(out["underlying"], "NIFTY");
+        assert!(out["state"]["futures"].is_null());
+        assert_eq!(out["state"]["flow"]["side"], serde_json::json!("put"));
     }
 }

@@ -11,6 +11,7 @@
 
 use super::{Access, RouteSpec};
 use crate::server::routes::webui::ok;
+use crate::services::market_read_core::{build_read, ReadInputs};
 use crate::services::oi_flow_db::{available_sessions, load_day};
 use crate::services::oi_levels::{build_levels, LevelInputs};
 use crate::services::writer_flow_service::{flow_answer, recorder_enabled, FlowView};
@@ -41,7 +42,66 @@ pub fn table() -> Vec<RouteSpec> {
             access: Access::User,
             make: || get(api_levels),
         },
+        RouteSpec {
+            path: "/writerflow/api/read",
+            method: Method::GET,
+            access: Access::User,
+            make: || get(api_read),
+        },
     ]
+}
+
+/// GET /writerflow/api/read -- the once-a-minute Market Read for the recorded
+/// day: who leads option writing, support/resistance, and price (futures,
+/// India VIX and IV are null until a live quote feed is wired).
+pub async fn api_read(Query(q): Q) -> Response {
+    let underlying = arg(&q, "underlying").unwrap_or("").to_uppercase();
+    if underlying.is_empty() {
+        return ok(json!({"status": "error", "message": "Choose an underlying, such as NIFTY."}));
+    }
+    let expiry = arg(&q, "expiry").unwrap_or("").to_uppercase();
+    let day = arg(&q, "date").and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
+    let sessions = match available_sessions(10) {
+        Ok(s) => s,
+        Err(_) => return ok(json!({"status": "error", "message": READ_FAILED})),
+    };
+    let chosen = sessions
+        .into_iter()
+        .filter(|s| s.underlying == underlying)
+        .filter(|s| day.map(|d| s.trade_date == d.to_string()).unwrap_or(true))
+        .find(|s| expiry.is_empty() || s.expiry == expiry);
+    let Some(chosen) = chosen else {
+        return ok(json!({
+            "status": "empty",
+            "message": "Nothing recorded for this yet.",
+            "recorder_enabled": recorder_enabled(),
+        }));
+    };
+    let Ok(trade_date) = NaiveDate::parse_from_str(&chosen.trade_date, "%Y-%m-%d") else {
+        return ok(json!({"status": "error", "message": READ_FAILED}));
+    };
+    let samples = match load_day(&underlying, &chosen.expiry, trade_date) {
+        Ok(s) => s,
+        Err(_) => return ok(json!({"status": "error", "message": READ_FAILED})),
+    };
+    let inputs = ReadInputs {
+        underlying: underlying.clone(),
+        samples,
+        prev_close: None,
+    };
+    match build_read(&inputs) {
+        Some(mut v) => {
+            if let Some(o) = v.as_object_mut() {
+                o.insert("status".into(), json!("success"));
+            }
+            ok(v)
+        }
+        None => ok(json!({
+            "status": "empty",
+            "message": "Not enough recorded yet for a read.",
+            "recorder_enabled": recorder_enabled(),
+        })),
+    }
 }
 
 /// GET /writerflow/api/levels -- support/resistance zones, walls, touches and
