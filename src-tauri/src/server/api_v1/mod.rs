@@ -34,6 +34,7 @@ mod gtt;
 mod notify;
 mod nse_events;
 mod options;
+mod tradefinder;
 mod orders;
 mod sector_rotation;
 mod strategy;
@@ -354,6 +355,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/v1/search", post(data::search))
         .route("/api/v1/expiry", post(data::expiry))
         .route("/api/v1/nseevents", post(nse_events::nseevents))
+        .route("/api/v1/tfmarketpulse", post(tradefinder::tfmarketpulse))
+        .route("/api/v1/tfsectorscope", post(tradefinder::tfsectorscope))
         .route("/api/v1/instruments", get(data::instruments))
         .route("/api/v1/margin", post(data::margin))
         // options analytics

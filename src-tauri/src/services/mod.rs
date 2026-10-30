@@ -100,6 +100,7 @@ pub mod system_info;
 pub mod telegram_admin_service;
 pub mod tf_momentum_setup_math;
 pub mod tf_rank_movement;
+pub mod tradefinder_service;
 pub mod tools_service;
 pub mod traffic_service;
 pub mod tunnel;
