@@ -61,6 +61,7 @@ pub mod master_contract_service;
 pub mod monitor;
 pub mod notify_service;
 pub mod nse_events_service;
+pub mod nse_oi_bhavcopy;
 pub mod obligations;
 pub mod oi_flow_analysis;
 pub mod oi_flow_db;

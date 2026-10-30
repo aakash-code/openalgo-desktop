@@ -94,6 +94,8 @@ byteorder = "1.5"
 prost = "0.14"
 # Gzip master contracts (Upstox).
 flate2 = "1"
+# NSE F&O bhavcopy is a .csv.zip (prev-session OI for OI Profile change).
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # NATS nkey signatures for the Groww feed.
 ed25519-dalek = "2"
 # MQTT 3.1.1 market and order feeds (IIFL Capital). Pure Rust; built with

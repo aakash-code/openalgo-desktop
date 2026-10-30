@@ -3482,7 +3482,7 @@ dependencies = [
  "tar",
  "ureq",
  "vcpkg",
- "zip",
+ "zip 9.0.5",
 ]
 
 [[package]]
@@ -4330,6 +4330,7 @@ dependencies = [
  "webpki-roots 1.0.10",
  "whatsapp-rust",
  "zeroize",
+ "zip 2.6.1",
 ]
 
 [[package]]
@@ -8901,6 +8902,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "zip"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1dcb24d0152526ae49b9b96c1dcf71850ca1e0b882e4e28ed898a93c41334744"
+dependencies = [
+ "arbitrary",
+ "crc32fast",
+ "crossbeam-utils",
+ "flate2",
+ "indexmap 2.14.2",
+ "memchr",
+ "zopfli",
 ]
 
 [[package]]
