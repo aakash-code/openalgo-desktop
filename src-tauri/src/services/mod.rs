@@ -61,6 +61,8 @@ pub mod monitor;
 pub mod notify_service;
 pub mod nse_events_service;
 pub mod obligations;
+pub mod oi_flow_analysis;
+pub mod oi_flow_db;
 pub mod options_order_service;
 pub mod options_service;
 pub mod order_log_service;
@@ -95,6 +97,7 @@ pub mod tunnel;
 pub mod ui_order_service;
 pub mod update;
 pub mod watchlist_service;
+pub mod writer_flow_service;
 
 pub use analyzer_service::{AnalyzerService, AnalyzerStatus};
 pub use core::Reply;

@@ -42,6 +42,7 @@ pub mod watchlist;
 pub mod websocket_example;
 pub mod webui;
 pub mod whatsapp;
+pub mod writer_flow;
 use crate::server::middleware::{require_user, require_user_for_json};
 use crate::state::AppState;
 use axum::{
@@ -121,6 +122,7 @@ pub fn table() -> Vec<RouteSpec> {
         tunnel::table(),
         e2e::table(),
         agent::table(),
+        writer_flow::table(),
     ]
     .into_iter()
     .flatten()
