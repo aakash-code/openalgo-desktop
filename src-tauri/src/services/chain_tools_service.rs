@@ -732,6 +732,10 @@ pub async fn oi_profile(
                 // draws `live - base` without refetching the whole profile.
                 "ce_base": num(ce_oi),
                 "pe_base": num(pe_oi),
+                // The leg symbols, so a live-OI overlay can match each to a
+                // WebSocket `oi` tick (null when the strike has no such leg).
+                "ce_symbol": ce_sym.clone(),
+                "pe_symbol": pe_sym.clone(),
                 "ce_oi_change": change(ce_oi, &ce_sym),
                 "pe_oi_change": change(pe_oi, &pe_sym),
             })

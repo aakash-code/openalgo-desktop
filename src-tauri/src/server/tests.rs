@@ -239,6 +239,7 @@ mod api_limits;
 mod broker_busy;
 // docs-17, docs-30, docs-32: /api/v1 answers brought to the web's.
 mod api_parity;
+mod writer_flow_oi;
 // The built-in ngrok tunnel in the app (services::tunnel, server::tunnel).
 mod tunnel;
 // The Agent's configuration routes (the config part of blueprints/agent.py).
