@@ -15,6 +15,7 @@
 use crate::services::oi_flow_db::{self, FlowRow};
 use crate::services::options_service::{option_chain, option_exchange};
 use crate::services::search_ui_service;
+use crate::events::subscribers::UiEmitter;
 use crate::services::writer_flow_service::{rebuild_watched, recorder_enabled};
 use crate::state::AppState;
 use chrono::{Datelike, NaiveTime, Timelike};
