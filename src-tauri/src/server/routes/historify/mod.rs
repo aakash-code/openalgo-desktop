@@ -11,6 +11,7 @@ use crate::server::envelope::{error, EarlyReply};
 use crate::server::middleware::User;
 use crate::server::routes::webui::JsonBody;
 use crate::services::core::Reply;
+use crate::services::screener_service;
 use crate::state::AppState;
 use axum::{
     body::{Body, Bytes},
@@ -85,6 +86,7 @@ fn data_routes() -> Vec<RouteSpec> {
             download_watchlist
         ),
         h!(GET, "/historify/api/data", data),
+        h!(POST, "/historify/api/bulk-ohlcv", bulk_ohlcv),
         h!(GET, "/historify/api/catalog", catalog),
         h!(GET, "/historify/api/catalog/grouped", catalog_grouped),
         h!(GET, "/historify/api/catalog/metadata", catalog_metadata),
@@ -110,6 +112,33 @@ fn data_routes() -> Vec<RouteSpec> {
         },
         h!(GET, "/historify/api/sample/{format}", sample),
     ]
+}
+
+/// POST /historify/api/bulk-ohlcv (json: symbols [{symbol,exchange}], interval, bars).
+/// Bars for a screener scan; the scan itself runs in the browser worker.
+pub async fn bulk_ohlcv(State(ctx): Ctx, body: JsonBody) -> Response {
+    let pairs: Vec<(String, String)> = body
+        .0
+        .get("symbols")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|i| {
+                    let s = i.get("symbol").and_then(Value::as_str)?;
+                    let e = i.get("exchange").and_then(Value::as_str)?;
+                    Some((s.to_string(), e.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let interval = body.0.get("interval").and_then(Value::as_str).unwrap_or("5m").to_string();
+    let bars = body
+        .0
+        .get("bars")
+        .and_then(Value::as_i64)
+        .unwrap_or(screener_service::DEFAULT_BARS);
+    let (_ok, v, status) = screener_service::scan_bars(&ctx, &pairs, &interval, bars);
+    send(Reply::new(status, v))
 }
 
 /// The F&O lookups, download jobs and metadata enrichment.

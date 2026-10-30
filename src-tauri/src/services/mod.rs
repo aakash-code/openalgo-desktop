@@ -82,6 +82,7 @@ pub mod sandbox_export_service;
 pub mod sandbox_feed;
 pub mod schema;
 pub mod schemas;
+pub mod screener_service;
 pub mod search_ui_service;
 pub mod sector_rotation_service;
 pub mod security_service;
