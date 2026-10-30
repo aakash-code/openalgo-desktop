@@ -36,8 +36,8 @@ pub struct RankState {
 /// the last kept one is skipped (dupes/disorder), so no zero-elapsed step can
 /// divide the velocity by zero. Minute is a float -- the recorder samples twice
 /// a minute (604.5 = 10:04:30).
-fn clean_observations(observations: &[(f64, i64)]) -> Vec<(f64, i64)> {
-    let mut clean: Vec<(f64, i64)> = Vec::new();
+fn clean_observations<T: Copy>(observations: &[(f64, T)]) -> Vec<(f64, T)> {
+    let mut clean: Vec<(f64, T)> = Vec::new();
     for &(m, r) in observations {
         if let Some(&(last_m, _)) = clean.last() {
             if m <= last_m {
@@ -213,6 +213,199 @@ pub fn compute_topn(
     (zones, transitions)
 }
 
+// ----------------------------------------------------------------- sustained
+
+/// Default rolling window and max spread for [`compute_sustained`] (API
+/// defaults, like [`TOP_N_THRESHOLDS`]).
+pub const SUSTAINED_WINDOW: usize = 6;
+const SUSTAINED_MIN_OBS: usize = 3;
+pub const STABLE_ZONE_MAX_SPREAD: i64 = 5;
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SustainedState {
+    pub window: usize,
+    pub zone_low: i64,
+    pub zone_high: i64,
+    pub zone_spread: i64,
+    pub zone_median: f64,
+    pub is_stable_zone: bool,
+    pub sustained_top5: bool,
+    pub sustained_top10: bool,
+    pub sustained_top20: bool,
+}
+
+fn median(values: &[i64]) -> f64 {
+    let mut s = values.to_vec();
+    s.sort_unstable();
+    let n = s.len();
+    if n % 2 == 1 {
+        s[n / 2] as f64
+    } else {
+        (s[n / 2 - 1] + s[n / 2]) as f64 / 2.0
+    }
+}
+
+/// Pure: fold the last `window` observations into a stability view. "Sustained"
+/// means SETTLED (enough evidence AND a tight spread), so a symbol still
+/// climbing is inside Top-10 the whole way yet not established there.
+pub fn compute_sustained(
+    observations: &[(f64, i64)],
+    window: usize,
+    max_spread: i64,
+    thresholds: &[i64],
+) -> Option<SustainedState> {
+    let clean = clean_observations(observations);
+    if clean.is_empty() {
+        return None;
+    }
+    let start = clean.len().saturating_sub(window);
+    let win: Vec<i64> = clean[start..].iter().map(|&(_, r)| r).collect();
+    let low = *win.iter().min().unwrap();
+    let high = *win.iter().max().unwrap();
+    let spread = high - low;
+    let stable = win.len() >= SUSTAINED_MIN_OBS && spread <= max_spread;
+    Some(SustainedState {
+        window: win.len(),
+        zone_low: low,
+        zone_high: high,
+        zone_spread: spread,
+        zone_median: median(&win),
+        is_stable_zone: stable,
+        sustained_top5: stable && high <= thresholds[0],
+        sustained_top10: stable && high <= thresholds[1],
+        sustained_top20: stable && high <= thresholds[2],
+    })
+}
+
+// ------------------------------------------------------------ directional run
+
+const RUN_MIN_OBS: usize = 10;
+const RUN_MIN_MOVE_PCT: f64 = 0.6;
+const RUN_MIN_EFFICIENCY: f64 = 3.0;
+const RUN_ADVERSE_FLOOR: f64 = 0.15;
+const RUN_SUSTAIN_MIN: f64 = 5.0;
+const RUN_FLIP_FACTOR: f64 = 1.5;
+/// 09:20, as minutes-of-day: the first prints are pre-open figures, not prices.
+const RUN_SETTLE_MIN: f64 = 9.0 * 60.0 + 20.0;
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct RunState {
+    pub observations: usize,
+    pub direction: Option<String>,
+    pub move_pct: f64,
+    pub adverse_pct: f64,
+    pub efficiency: f64,
+    pub from_min: f64,
+    pub run_minutes: f64,
+    pub is_clean: bool,
+    pub sustained: bool,
+}
+
+fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
+/// Direction carried forward, reversing only on decisive evidence. Returns
+/// (direction, low_index, high_index) -- the final global extremes.
+fn walk_direction(values: &[f64], flip_factor: f64) -> (Option<&'static str>, usize, usize) {
+    let mut direction: Option<&'static str> = None;
+    let (mut low_i, mut high_i) = (0usize, 0usize);
+    for (i, &v) in values.iter().enumerate() {
+        if v < values[low_i] {
+            low_i = i;
+        }
+        if v > values[high_i] {
+            high_i = i;
+        }
+        let up = v - values[low_i];
+        let down = v - values[high_i];
+        if up == 0.0 && down == 0.0 {
+            continue;
+        }
+        match direction {
+            None => direction = Some(if up.abs() >= down.abs() { "up" } else { "down" }),
+            Some("up") => {
+                if down.abs() > up.abs() * flip_factor {
+                    direction = Some("down");
+                }
+            }
+            _ => {
+                if up.abs() > down.abs() * flip_factor {
+                    direction = Some("up");
+                }
+            }
+        }
+    }
+    (direction, low_i, high_i)
+}
+
+/// Pure: fold `[minute, change_pct]` into the current move's shape -- move
+/// against give-back, anchored where the current direction began, not at the
+/// open. `sustain_min` holds is_clean up briefly after it stops passing, so one
+/// run does not strobe into many badges.
+pub fn compute_run(changes: &[(f64, f64)]) -> Option<RunState> {
+    let clean: Vec<(f64, f64)> = clean_observations(changes)
+        .into_iter()
+        .filter(|&(m, _)| m >= RUN_SETTLE_MIN)
+        .collect();
+    if clean.len() < RUN_MIN_OBS {
+        return None;
+    }
+    let values: Vec<f64> = clean.iter().map(|&(_, v)| v).collect();
+    let now = *values.last().unwrap();
+
+    let (direction, low_i, high_i) = walk_direction(&values, RUN_FLIP_FACTOR);
+
+    let (anchor, mv) = match direction {
+        Some("up") => (low_i, now - values[low_i]),
+        Some("down") => (high_i, now - values[high_i]),
+        _ => (values.len() - 1, 0.0),
+    };
+
+    let mut adverse = 0.0f64;
+    let mut last_clean_min: Option<f64> = None;
+    if direction.is_some() {
+        let base = values[anchor];
+        let mut extreme = values[anchor];
+        for idx in anchor..values.len() {
+            let value = values[idx];
+            extreme = if direction == Some("up") {
+                extreme.max(value)
+            } else {
+                extreme.min(value)
+            };
+            let give_back = if direction == Some("up") {
+                extreme - value
+            } else {
+                value - extreme
+            };
+            adverse = adverse.max(give_back);
+            let step_move = value - base;
+            let step_eff = step_move.abs() / adverse.max(RUN_ADVERSE_FLOOR);
+            if step_move.abs() >= RUN_MIN_MOVE_PCT && step_eff >= RUN_MIN_EFFICIENCY {
+                last_clean_min = Some(clean[idx].0);
+            }
+        }
+    }
+
+    let efficiency = mv.abs() / adverse.max(RUN_ADVERSE_FLOOR);
+    let clean_now = direction.is_some() && mv.abs() >= RUN_MIN_MOVE_PCT && efficiency >= RUN_MIN_EFFICIENCY;
+    let sustained = !clean_now
+        && last_clean_min.is_some_and(|lc| clean.last().unwrap().0 - lc <= RUN_SUSTAIN_MIN);
+
+    Some(RunState {
+        observations: clean.len(),
+        direction: direction.map(str::to_string),
+        move_pct: round2(mv),
+        adverse_pct: round2(adverse),
+        efficiency: round2(efficiency),
+        from_min: clean[anchor].0,
+        run_minutes: clean.last().unwrap().0 - clean[anchor].0,
+        is_clean: clean_now || sustained,
+        sustained,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +483,46 @@ mod tests {
         assert!(!zones[&5].inside);
         assert_eq!(zones[&20].entries, 1);
         assert!(zones[&20].inside);
+    }
+
+    #[test]
+    fn sustained_needs_evidence_and_a_tight_spread() {
+        // A settled 6-8 zone over 6 observations: stable, sustained in Top-10/20.
+        let obs = [(0.0, 6), (1.0, 7), (2.0, 6), (3.0, 8), (4.0, 7), (5.0, 6)];
+        let s = compute_sustained(&obs, SUSTAINED_WINDOW, STABLE_ZONE_MAX_SPREAD, &TOP_N_THRESHOLDS)
+            .unwrap();
+        assert_eq!(s.zone_low, 6);
+        assert_eq!(s.zone_high, 8);
+        assert_eq!(s.zone_spread, 2);
+        assert!(s.is_stable_zone);
+        assert!(!s.sustained_top5); // 8 > 5
+        assert!(s.sustained_top10);
+        assert!(s.sustained_top20);
+
+        // A chop (spread 15) is never a zone.
+        let chop = [(0.0, 9), (1.0, 2), (2.0, 17)];
+        let c = compute_sustained(&chop, SUSTAINED_WINDOW, STABLE_ZONE_MAX_SPREAD, &TOP_N_THRESHOLDS)
+            .unwrap();
+        assert!(!c.is_stable_zone);
+        assert!(!c.sustained_top20);
+    }
+
+    #[test]
+    fn a_clean_up_run_is_measured_from_the_turn() {
+        // 11 post-settle observations rising 0.0 -> 2.0 with no give-back.
+        let obs: Vec<(f64, f64)> = (0..=10).map(|i| (560.0 + i as f64, 0.2 * i as f64)).collect();
+        let r = compute_run(&obs).unwrap();
+        assert_eq!(r.direction.as_deref(), Some("up"));
+        assert_eq!(r.observations, 11);
+        assert_eq!(r.move_pct, 2.0);
+        assert_eq!(r.adverse_pct, 0.0);
+        assert!(r.is_clean);
+    }
+
+    #[test]
+    fn a_run_before_the_settle_minute_is_dropped() {
+        // All pre-09:20 -> filtered out -> fewer than RUN_MIN_OBS -> None.
+        let obs: Vec<(f64, f64)> = (0..=10).map(|i| (540.0 + i as f64, 0.2 * i as f64)).collect();
+        assert!(compute_run(&obs).is_none());
     }
 }
