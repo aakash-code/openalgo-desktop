@@ -406,6 +406,186 @@ pub fn compute_run(changes: &[(f64, f64)]) -> Option<RunState> {
     })
 }
 
+// ------------------------------------------------------------ classification
+
+const RANK_JUMP_LARGE: i64 = 15;
+const RANK_JUMP_EXTREME: i64 = 30;
+const FAST_CLIMB_MIN_VELOCITY: f64 = 5.0;
+const RUN_LEADER_RANK: i64 = 20;
+const RUN_MIN_CLIMB: i64 = 10;
+const RUN_ALLOW_DOWN: bool = true;
+const PRESENCE_TOLERANCE_MIN: f64 = 2.0;
+
+/// Higher wins when several apply. A clean run outranks single-step labels; an
+/// absent/last-known standing sits at the bottom so nothing alerts on it.
+pub fn event_priority(event: &str) -> i64 {
+    match event {
+        "EXTREME_JUMP" => 100,
+        "CLEAN_RUN_UP" => 95,
+        "CLEAN_RUN_DOWN" => 94,
+        "LARGE_JUMP" => 90,
+        "FAST_CLIMB" => 80,
+        "TOP5_ENTRY" => 75,
+        "TOP5_RE_ENTRY" => 74,
+        "TOP10_ENTRY" => 70,
+        "TOP10_RE_ENTRY" => 69,
+        "TOP20_ENTRY" => 60,
+        "TOP20_RE_ENTRY" => 59,
+        "SUSTAINED_TOP5" => 55,
+        "SUSTAINED_TOP10" => 50,
+        "SUSTAINED_TOP20" => 45,
+        "CLIMBING" => 30,
+        "FAST_DROP" => 25,
+        "TOP5_EXIT" => 22,
+        "TOP10_EXIT" => 21,
+        "TOP20_EXIT" => 20,
+        "FALLING" => 15,
+        "NEW" => 10,
+        _ => 0, // NORMAL, ABSENT
+    }
+}
+
+/// Pure: the single most salient event for the symbol's latest step. Only
+/// crossings on the latest observed minute count (so a Top-10 entry ten minutes
+/// ago does not re-fire), and a crossing on the FIRST observation is not one
+/// (we never saw it outside the zone).
+pub fn classify_event(
+    state: &RankState,
+    zones: &BTreeMap<i64, TopNZone>,
+    transitions: &[TopNTransition],
+    sustained: Option<&SustainedState>,
+    run: Option<&RunState>,
+) -> (String, i64) {
+    let _ = zones; // standing is read via `sustained`; zones kept for parity/callers
+    let mut candidates: Vec<String> = Vec::new();
+
+    for t in transitions {
+        if t.minute == state.last_seen_min && t.minute != state.first_seen_min {
+            candidates.push(format!("TOP{}_{}", t.threshold, t.kind));
+        }
+    }
+
+    if let Some(d) = state.rank_delta {
+        if d >= RANK_JUMP_EXTREME {
+            candidates.push("EXTREME_JUMP".into());
+        } else if d >= RANK_JUMP_LARGE {
+            candidates.push("LARGE_JUMP".into());
+        }
+        if d <= -RANK_JUMP_LARGE {
+            candidates.push("FAST_DROP".into());
+        } else if d > 0 {
+            candidates.push("CLIMBING".into());
+        } else if d < 0 {
+            candidates.push("FALLING".into());
+        }
+    }
+
+    if state.rank_velocity.is_some_and(|v| v >= FAST_CLIMB_MIN_VELOCITY) {
+        candidates.push("FAST_CLIMB".into());
+    }
+
+    if let Some(s) = sustained {
+        if s.sustained_top5 {
+            candidates.push("SUSTAINED_TOP5".into());
+        } else if s.sustained_top10 {
+            candidates.push("SUSTAINED_TOP10".into());
+        } else if s.sustained_top20 {
+            candidates.push("SUSTAINED_TOP20".into());
+        }
+    }
+
+    if let Some(r) = run {
+        if r.is_clean {
+            if let Some(dir) = r.direction.as_deref() {
+                let rated = state.current_rank <= RUN_LEADER_RANK
+                    || (state.first_seen_rank - state.current_rank) >= RUN_MIN_CLIMB;
+                let has_force = state.rank_change_since_first_seen >= 0;
+                if rated && has_force && (dir == "up" || RUN_ALLOW_DOWN) {
+                    candidates
+                        .push(if dir == "up" { "CLEAN_RUN_UP" } else { "CLEAN_RUN_DOWN" }.into());
+                }
+            }
+        }
+    }
+
+    if state.observations == 1 {
+        candidates.push("NEW".into());
+    }
+    if candidates.is_empty() {
+        candidates.push("NORMAL".into());
+    }
+
+    let event = candidates
+        .into_iter()
+        .max_by_key(|e| event_priority(e))
+        .unwrap();
+    let priority = event_priority(&event);
+    (event, priority)
+}
+
+/// Pure: the full current-day picture for one symbol as a flat JSON object (the
+/// RankUIModel the API/frontend consume), or None if unusable. `latest_minute`
+/// is the newest minute ANY symbol was snapshotted for this list today; a
+/// symbol missing from it is `present: false` with event ABSENT (its standing
+/// stays as last-known but it claims no current event).
+pub fn compute_symbol_movement(
+    symbol: &str,
+    observations: &[(f64, i64)],
+    latest_minute: Option<f64>,
+    changes: Option<&[(f64, f64)]>,
+) -> Option<serde_json::Value> {
+    let state = compute_rank_state(symbol, observations)?;
+    let (zones, transitions) = compute_topn(observations, &TOP_N_THRESHOLDS);
+    let sustained =
+        compute_sustained(observations, SUSTAINED_WINDOW, STABLE_ZONE_MAX_SPREAD, &TOP_N_THRESHOLDS);
+    let run = changes.and_then(compute_run);
+    let (mut event, mut priority) =
+        classify_event(&state, &zones, &transitions, sustained.as_ref(), run.as_ref());
+
+    let stale_by = latest_minute
+        .map(|lm| (lm - state.last_seen_min).max(0.0))
+        .unwrap_or(0.0);
+    let present = stale_by <= PRESENCE_TOLERANCE_MIN;
+    if !present {
+        event = "ABSENT".into();
+        priority = 0;
+    }
+
+    let mut out = serde_json::to_value(&state).ok()?;
+    let o = out.as_object_mut()?;
+    let b = |t: Option<&SustainedState>, f: fn(&SustainedState) -> bool| t.map(f).unwrap_or(false);
+    o.insert("top5".into(), serde_json::json!(zones[&5].inside));
+    o.insert("top10".into(), serde_json::json!(zones[&10].inside));
+    o.insert("top20".into(), serde_json::json!(zones[&20].inside));
+    o.insert("top5_entries".into(), serde_json::json!(zones[&5].entries));
+    o.insert("top10_entries".into(), serde_json::json!(zones[&10].entries));
+    o.insert("top20_entries".into(), serde_json::json!(zones[&20].entries));
+    o.insert("sustained_top5".into(), serde_json::json!(b(sustained.as_ref(), |s| s.sustained_top5)));
+    o.insert("sustained_top10".into(), serde_json::json!(b(sustained.as_ref(), |s| s.sustained_top10)));
+    o.insert("sustained_top20".into(), serde_json::json!(b(sustained.as_ref(), |s| s.sustained_top20)));
+    o.insert("zone_low".into(), serde_json::json!(sustained.as_ref().map(|s| s.zone_low)));
+    o.insert("zone_high".into(), serde_json::json!(sustained.as_ref().map(|s| s.zone_high)));
+    o.insert("zone_median".into(), serde_json::json!(sustained.as_ref().map(|s| s.zone_median)));
+    o.insert("is_stable_zone".into(), serde_json::json!(b(sustained.as_ref(), |s| s.is_stable_zone)));
+    o.insert("event".into(), serde_json::json!(event));
+    o.insert("event_priority".into(), serde_json::json!(priority));
+    o.insert("present".into(), serde_json::json!(present));
+    o.insert("minutes_since_last_seen".into(), serde_json::json!(stale_by));
+    o.insert("run_direction".into(), serde_json::json!(run.as_ref().and_then(|r| r.direction.clone())));
+    o.insert("run_move_pct".into(), serde_json::json!(run.as_ref().map(|r| r.move_pct)));
+    o.insert("run_adverse_pct".into(), serde_json::json!(run.as_ref().map(|r| r.adverse_pct)));
+    o.insert("run_efficiency".into(), serde_json::json!(run.as_ref().map(|r| r.efficiency)));
+    o.insert("run_minutes".into(), serde_json::json!(run.as_ref().map(|r| r.run_minutes)));
+    o.insert("run_from_min".into(), serde_json::json!(run.as_ref().map(|r| r.from_min)));
+    o.insert("run_clean".into(), serde_json::json!(run.as_ref().map(|r| r.is_clean).unwrap_or(false)));
+    o.insert("run_sustained".into(), serde_json::json!(run.as_ref().map(|r| r.sustained).unwrap_or(false)));
+    o.insert(
+        "day_change_pct".into(),
+        serde_json::json!(changes.and_then(|c| c.last()).map(|&(_, v)| round2(v))),
+    );
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,5 +704,28 @@ mod tests {
         // All pre-09:20 -> filtered out -> fewer than RUN_MIN_OBS -> None.
         let obs: Vec<(f64, f64)> = (0..=10).map(|i| (540.0 + i as f64, 0.2 * i as f64)).collect();
         assert!(compute_run(&obs).is_none());
+    }
+
+    #[test]
+    fn movement_classifies_a_large_jump_and_marks_present() {
+        // Rank 40 -> 20 in one minute: a +20 delta = LARGE_JUMP (beats the
+        // Top-20 entry and FAST_CLIMB it also triggers).
+        let out = compute_symbol_movement("A", &[(0.0, 40), (1.0, 20)], Some(1.0), None).unwrap();
+        assert_eq!(out["event"], serde_json::json!("LARGE_JUMP"));
+        assert_eq!(out["event_priority"], serde_json::json!(90));
+        assert_eq!(out["present"], serde_json::json!(true));
+        assert_eq!(out["top20"], serde_json::json!(true));
+        assert_eq!(out["current_rank"], serde_json::json!(20));
+    }
+
+    #[test]
+    fn movement_marks_a_stale_symbol_absent() {
+        // Last seen at minute 1 but the list's latest snapshot is minute 100:
+        // beyond the tolerance, so present=false and the event is ABSENT.
+        let out = compute_symbol_movement("B", &[(0.0, 8), (1.0, 6)], Some(100.0), None).unwrap();
+        assert_eq!(out["present"], serde_json::json!(false));
+        assert_eq!(out["event"], serde_json::json!("ABSENT"));
+        // Standing stays as last-known.
+        assert_eq!(out["current_rank"], serde_json::json!(6));
     }
 }
