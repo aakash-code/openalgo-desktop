@@ -728,6 +728,10 @@ pub async fn oi_profile(
                 "strike": k,
                 "ce_oi": num(ce_oi),
                 "pe_oi": num(pe_oi),
+                // The polled OI, so a client holding a live WebSocket `oi` tick
+                // draws `live - base` without refetching the whole profile.
+                "ce_base": num(ce_oi),
+                "pe_base": num(pe_oi),
                 "ce_oi_change": change(ce_oi, &ce_sym),
                 "pe_oi_change": change(pe_oi, &pe_sym),
             })
@@ -747,6 +751,83 @@ pub async fn oi_profile(
     });
     note_partial_oi_change(&mut out, &prev, wanted_set.len());
     Reply::ok(out)
+}
+
+/// OI Profile summed across several ticked expiries, Sensibull-style (fork
+/// feature): per strike, the open interest and change added over each expiry.
+/// One or zero expiries fall straight through to [`oi_profile`]. The futures
+/// candles, spot and ATM come from the first (nearest) expiry.
+pub async fn oi_profile_multi(
+    ctx: &AppState,
+    underlying: &str,
+    exchange: &str,
+    expiries: &[String],
+    interval: &str,
+    days: i64,
+) -> Reply {
+    if expiries.len() <= 1 {
+        let e = expiries.first().map(String::as_str).unwrap_or("");
+        return oi_profile(ctx, underlying, exchange, e, interval, days).await;
+    }
+    // strike-bits -> (ce_oi, pe_oi, ce_change, pe_change); a change is summed
+    // only while every expiry knew it, else null (an unknown is not a zero).
+    type Agg = (f64, f64, Option<f64>, Option<f64>);
+    let mut summed: std::collections::BTreeMap<u64, Agg> = std::collections::BTreeMap::new();
+    let mut base: Option<Value> = None;
+    for expiry in expiries {
+        let reply = oi_profile(ctx, underlying, exchange, expiry, interval, days).await;
+        if reply.status != 200 {
+            continue;
+        }
+        let body = reply.body;
+        let Some(chain) = body.get("oi_chain").and_then(Value::as_array) else {
+            continue;
+        };
+        for row in chain {
+            let Some(k) = row.get("strike").and_then(Value::as_f64) else { continue };
+            let e = summed.entry(k.to_bits()).or_insert((0.0, 0.0, Some(0.0), Some(0.0)));
+            e.0 += row.get("ce_oi").and_then(Value::as_f64).unwrap_or(0.0);
+            e.1 += row.get("pe_oi").and_then(Value::as_f64).unwrap_or(0.0);
+            e.2 = add_opt(e.2, row.get("ce_oi_change"));
+            e.3 = add_opt(e.3, row.get("pe_oi_change"));
+        }
+        if base.is_none() {
+            base = Some(body);
+        }
+    }
+    let Some(mut out) = base else {
+        return oi_profile(ctx, underlying, exchange, &expiries[0], interval, days).await;
+    };
+    let oi_chain: Vec<Value> = summed
+        .into_iter()
+        .map(|(kbits, (ce, pe, cec, pec))| {
+            let k = f64::from_bits(kbits);
+            json!({
+                "strike": k,
+                "ce_oi": num(ce),
+                "pe_oi": num(pe),
+                "ce_base": num(ce),
+                "pe_base": num(pe),
+                "ce_oi_change": cec.map(num).unwrap_or(Value::Null),
+                "pe_oi_change": pec.map(num).unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+    if let Some(o) = out.as_object_mut() {
+        o.insert("oi_chain".into(), json!(oi_chain));
+        o.insert("expiry_dates".into(), json!(expiries));
+        o.insert("expiry_date".into(), json!(expiries.join(", ")));
+    }
+    Reply::ok(out)
+}
+
+/// Add a JSON OI-change (number, 0, or null) onto a running sum, propagating
+/// "unknown": once any expiry's change is null the sum is null.
+fn add_opt(acc: Option<f64>, v: Option<&Value>) -> Option<f64> {
+    match (acc, v.and_then(Value::as_f64)) {
+        (Some(a), Some(x)) => Some(a + x),
+        _ => None,
+    }
 }
 
 /// A contract's OI change since the previous day. One whose previous OI

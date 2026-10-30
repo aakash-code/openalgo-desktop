@@ -172,7 +172,24 @@ pub async fn profile_data(State(ctx): Ctx, body: JsonBody) -> Response {
     if let Some(r) = need_broker(&ctx) {
         return r;
     }
-    send(chain::oi_profile(&ctx, &u, &e, &x, &interval, days).await)
+    // Optional multi-expiry sum (Sensibull-style): a list of ticked expiries
+    // summed per strike. Absent or one entry falls through to the single expiry.
+    let expiry_dates: Vec<String> = body
+        .0
+        .get("expiry_dates")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if expiry_dates.len() > 1 {
+        send(chain::oi_profile_multi(&ctx, &u, &e, &expiry_dates, &interval, days).await)
+    } else {
+        send(chain::oi_profile(&ctx, &u, &e, &x, &interval, days).await)
+    }
 }
 
 /// Python's `str()` of a JSON field, as far as it decides which refusal
