@@ -797,6 +797,29 @@ schema!(
 // so both are read from the raw body and the rest is excluded here.
 schema!(nse_events, Schema::new(vec![apikey()]).exclude_unknown());
 
+schema!(
+    signal_ingest,
+    Schema::new(vec![
+        apikey(),
+        Field::str("eventId").required().validate(Validator::length(1, 128)),
+        Field::str("event")
+            .required()
+            .validate(Validator::one_of(&["open", "invalidated"])),
+        Field::str("symbol").required(),
+        Field::str("exchange").required(),
+        Field::str("sector").required(),
+        Field::str("side")
+            .required()
+            .validate(Validator::one_of(&["LONG", "SHORT"])),
+        Field::float("entry").required(),
+        Field::float("stop").required(),
+        Field::float("target").required(),
+        Field::float("stopPct").required(),
+        Field::str("signalTimeIst").required(),
+    ])
+    .exclude_unknown()
+);
+
 /// `validate_option_offset`.
 pub fn option_offset_valid(s: &str) -> bool {
     let up = s.to_ascii_uppercase();

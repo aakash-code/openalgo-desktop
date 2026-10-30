@@ -32,6 +32,7 @@ pub mod scalping;
 pub mod search;
 pub mod security;
 pub mod settings;
+pub mod signals;
 pub mod strategy_module;
 pub mod strategy_portfolio;
 pub mod telegram;
@@ -123,6 +124,7 @@ pub fn table() -> Vec<RouteSpec> {
         e2e::table(),
         agent::table(),
         writer_flow::table(),
+        signals::table(),
     ]
     .into_iter()
     .flatten()

@@ -456,6 +456,10 @@ fn csrf_exempt(path: &str) -> bool {
         // same-origin request like every other write (security review S-05).
         || path == "/auth/login"
         || path.starts_with("/strategy/webhook/")
+        // Signal distribution: the producer authenticates with the account's
+        // apikey in the body, never the browser session (its own /signals/v1
+        // surface, like /api/v1).
+        || path.starts_with("/signals/v1")
         // The OpenScript runner page: each call carries its run's secret.
         || path.starts_with("/openscript/runner/host/")
         || path.starts_with("/chartink/webhook/")
