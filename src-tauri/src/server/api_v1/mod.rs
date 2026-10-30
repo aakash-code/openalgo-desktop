@@ -32,6 +32,7 @@ mod chart;
 mod data;
 mod gtt;
 mod notify;
+mod nse_events;
 mod options;
 mod orders;
 mod sector_rotation;
@@ -352,6 +353,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/v1/symbol", post(data::symbol))
         .route("/api/v1/search", post(data::search))
         .route("/api/v1/expiry", post(data::expiry))
+        .route("/api/v1/nseevents", post(nse_events::nseevents))
         .route("/api/v1/instruments", get(data::instruments))
         .route("/api/v1/margin", post(data::margin))
         // options analytics

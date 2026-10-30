@@ -792,6 +792,11 @@ schema!(
     ])
 );
 
+// NSE events validates the key only; `symbols` is a list of bare strings the
+// typed loader has no kind for, and `within_days` is clamped in the service,
+// so both are read from the raw body and the rest is excluded here.
+schema!(nse_events, Schema::new(vec![apikey()]).exclude_unknown());
+
 /// `validate_option_offset`.
 pub fn option_offset_valid(s: &str) -> bool {
     let up = s.to_ascii_uppercase();
