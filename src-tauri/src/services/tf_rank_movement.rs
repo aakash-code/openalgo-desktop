@@ -6,6 +6,7 @@
 //! fuller top-N / sustained / run / classify passes are later stages.
 
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RankState {
@@ -116,6 +117,102 @@ pub fn compute_rank_state(symbol: &str, observations: &[(f64, i64)]) -> Option<R
     })
 }
 
+/// Top-N zones the engine tracks (rank <= threshold), best (smallest) first.
+pub const TOP_N_THRESHOLDS: [i64; 3] = [5, 10, 20];
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TopNZone {
+    pub threshold: i64,
+    pub inside: bool,
+    pub entered_min: Option<f64>,
+    pub entries: i64,
+    /// Span of the open stretch since the last entry (0 when outside).
+    pub continuous_min: f64,
+    /// Every stretch spent inside today, summed.
+    pub cumulative_min: f64,
+    pub last_event: Option<String>,
+    pub last_event_min: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TopNTransition {
+    pub minute: f64,
+    pub threshold: i64,
+    /// "ENTRY" (first time today) | "RE_ENTRY" (a later entry) | "EXIT".
+    pub kind: String,
+}
+
+/// Pure: per-zone standing plus the ordered threshold crossings. A crossing
+/// fires only on the boundary (so an hour inside Top-10 is one ENTRY, not
+/// thirty); a symbol that simply stops appearing is left inside with its
+/// last-known standing, never forced to EXIT (an absent snapshot is not a rank).
+pub fn compute_topn(
+    observations: &[(f64, i64)],
+    thresholds: &[i64],
+) -> (BTreeMap<i64, TopNZone>, Vec<TopNTransition>) {
+    let clean = clean_observations(observations);
+    let mut zones: BTreeMap<i64, TopNZone> = BTreeMap::new();
+    let mut transitions: Vec<TopNTransition> = Vec::new();
+
+    for &n in thresholds {
+        let mut inside = false;
+        let mut entered_min: Option<f64> = None;
+        let mut last_inside_min: Option<f64> = None;
+        let mut entries = 0i64;
+        let mut cumulative = 0.0f64;
+        let mut last_event: Option<String> = None;
+        let mut last_event_min: Option<f64> = None;
+
+        for &(m, r) in &clean {
+            let now_inside = r <= n;
+            if now_inside && !inside {
+                entries += 1;
+                entered_min = Some(m);
+                last_inside_min = Some(m);
+                let kind = if entries == 1 { "ENTRY" } else { "RE_ENTRY" };
+                transitions.push(TopNTransition { minute: m, threshold: n, kind: kind.to_string() });
+                last_event = Some(format!("TOP{n}_{kind}"));
+                last_event_min = Some(m);
+            } else if now_inside && inside {
+                last_inside_min = Some(m);
+            } else if !now_inside && inside {
+                // Close the stretch at the last minute actually seen inside.
+                if let (Some(e), Some(li)) = (entered_min, last_inside_min) {
+                    cumulative += li - e;
+                }
+                transitions.push(TopNTransition { minute: m, threshold: n, kind: "EXIT".to_string() });
+                last_event = Some(format!("TOP{n}_EXIT"));
+                last_event_min = Some(m);
+                entered_min = None;
+            }
+            inside = now_inside;
+        }
+
+        let mut continuous = 0.0;
+        if inside {
+            if let (Some(e), Some(li)) = (entered_min, last_inside_min) {
+                continuous = li - e;
+                cumulative += continuous;
+            }
+        }
+
+        zones.insert(
+            n,
+            TopNZone {
+                threshold: n,
+                inside,
+                entered_min,
+                entries,
+                continuous_min: continuous,
+                cumulative_min: cumulative,
+                last_event,
+                last_event_min,
+            },
+        );
+    }
+    (zones, transitions)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +264,31 @@ mod tests {
     #[test]
     fn empty_is_none() {
         assert!(compute_rank_state("X", &[]).is_none());
+    }
+
+    #[test]
+    fn topn_tracks_entry_exit_reentry() {
+        // rank: 12 (out), 8 (enter T10), 6 (in), 15 (exit T10), 9 (re-enter T10).
+        let obs = [(0.0, 12), (2.0, 8), (4.0, 6), (6.0, 15), (8.0, 9)];
+        let (zones, transitions) = compute_topn(&obs, &TOP_N_THRESHOLDS);
+
+        let t10 = &zones[&10];
+        assert!(t10.inside);
+        assert_eq!(t10.entries, 2);
+        assert_eq!(t10.cumulative_min, 2.0); // the 2->4 stretch; the re-entry is 0 wide so far
+        assert_eq!(t10.last_event.as_deref(), Some("TOP10_RE_ENTRY"));
+
+        let kinds: Vec<&str> = transitions
+            .iter()
+            .filter(|t| t.threshold == 10)
+            .map(|t| t.kind.as_str())
+            .collect();
+        assert_eq!(kinds, vec!["ENTRY", "EXIT", "RE_ENTRY"]);
+
+        // Never reached Top-5 (best rank 6); always within Top-20 (worst 15).
+        assert_eq!(zones[&5].entries, 0);
+        assert!(!zones[&5].inside);
+        assert_eq!(zones[&20].entries, 1);
+        assert!(zones[&20].inside);
     }
 }
