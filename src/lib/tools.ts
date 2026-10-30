@@ -120,6 +120,13 @@ export const tools: Tool[] = [
     color: 'bg-orange-700',
   },
   {
+    title: 'Writer Flow',
+    description:
+      'Where option writers are adding, covering or holding, strike by strike through the day, with how long each has lasted',
+    href: '/writerflow',
+    color: 'bg-emerald-500',
+  },
+  {
     title: 'Arbitrage',
     description:
       'Realtime futures calendar-spread scanner across NFO & MCX, ranked by executable bid/ask spread % with one-click two-leg orders',
