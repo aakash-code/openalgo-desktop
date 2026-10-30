@@ -21,6 +21,12 @@ export interface OIProfileChainItem {
    */
   ce_oi_change: number | null
   pe_oi_change: number | null
+  /** The polled OI, so a live WebSocket `oi` tick draws `live - base`. */
+  ce_base?: number | null
+  pe_base?: number | null
+  /** The leg symbol, to match a live tick (null when the strike has no leg). */
+  ce_symbol?: string | null
+  pe_symbol?: string | null
 }
 
 export interface OIProfileDataResponse {
