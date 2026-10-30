@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { io, type Socket } from 'socket.io-client'
 import { toast } from 'sonner'
+import { setServerEventSocket } from '@/lib/serverEvents'
 import { type AlertCategories, useAlertStore } from '@/stores/alertStore'
 import { useAuthStore } from '@/stores/authStore'
 import { useBrokerStore } from '@/stores/brokerStore'
@@ -160,6 +161,9 @@ export function useSocket() {
 
     const socket = socketRef.current
     setSocketInstance(socket)
+    // Hand the live connection to the server-event bus (custom chart
+    // indicators consume writer_flow_update / market_read_update through it).
+    setServerEventSocket(socket)
 
     // Force logout from another device
     socket.on('force_logout', (data: { message: string }) => {
@@ -344,6 +348,7 @@ export function useSocket() {
     return () => {
       socket.disconnect()
       setSocketInstance(null)
+      setServerEventSocket(null)
       ;['click', 'touchstart', 'keydown'].forEach((eventType) => {
         document.removeEventListener(eventType, handleInteraction)
       })
