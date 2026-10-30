@@ -76,6 +76,7 @@ const IVSmile = lazy(() => import('@/pages/IVSmile'))
 const OIProfile = lazy(() => import('@/pages/OIProfile'))
 const WriterFlow = lazy(() => import('@/pages/WriterFlow'))
 const MarketRead = lazy(() => import('@/pages/MarketRead'))
+const Screener = lazy(() => import('@/pages/Screener'))
 const Arbitrage = lazy(() => import('@/pages/Arbitrage'))
 const StrategyBuilder = lazy(() => import('@/pages/StrategyBuilder'))
 const SectorRotation = lazy(() => import('@/pages/SectorRotation'))
@@ -218,6 +219,7 @@ function App() {
                 <Route path="/oiprofile" element={<OIProfile />} />
                 <Route path="/writerflow" element={<WriterFlow />} />
                 <Route path="/marketread" element={<MarketRead />} />
+                <Route path="/screener" element={<Screener />} />
                 <Route path="/arbitrage" element={<Arbitrage />} />
                 <Route path="/strategybuilder" element={<StrategyBuilder />} />
                 <Route path="/sector-rotation" element={<SectorRotation />} />

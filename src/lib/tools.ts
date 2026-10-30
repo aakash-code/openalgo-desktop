@@ -140,4 +140,11 @@ export const tools: Tool[] = [
     href: '/arbitrage',
     color: 'bg-green-700',
   },
+  {
+    title: 'Screener',
+    description:
+      'Scan a watchlist or TradeFinder list with any chart indicator, filter on its plots and conditions, and sort the results',
+    href: '/screener',
+    color: 'bg-sky-600',
+  },
 ]
