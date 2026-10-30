@@ -227,6 +227,8 @@ async fn start_services(
     services::health_service::start(ctx);
     // Writer Flow per-minute OI recorder (opt-in: OI_FLOW_RECORDER_ENABLED).
     services::oi_flow_recorder::start(ctx);
+    // TradeFinder Intraday Boost snapshot recorder (opt-in: TF_BOOST_RECORDER_ENABLED).
+    services::tf_boost_recorder::start(ctx);
     // Sleep and wake: feeds reconnect and orders are checked (owned task).
     services::lifecycle::wake::start(ctx);
     let server = server::start(ctx.clone()).await.ok();
