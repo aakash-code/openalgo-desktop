@@ -41,6 +41,7 @@ pub mod tunnel;
 pub mod update;
 pub mod watchlist;
 pub mod websocket_example;
+pub mod tradefinder;
 pub mod webui;
 pub mod whatsapp;
 pub mod writer_flow;
@@ -125,6 +126,7 @@ pub fn table() -> Vec<RouteSpec> {
         agent::table(),
         writer_flow::table(),
         signals::table(),
+        tradefinder::table(),
     ]
     .into_iter()
     .flatten()

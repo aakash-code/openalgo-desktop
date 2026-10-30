@@ -51,3 +51,50 @@ async fn market_pulse_refuses_a_wrong_apikey() {
         .await;
     assert_eq!(s, StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn jwt_keepalive_reports_no_token_when_none_is_configured() {
+    let h = H::new();
+    let key = h.setup();
+    let (s, v) = h
+        .json(post_json(
+            "/api/v1/tfjwtkeepalive",
+            json!({"apikey": key, "minSeconds": 1800}),
+        ))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["status"], json!("success"), "{v}");
+    assert_eq!(v["hasToken"], json!(false), "{v}");
+    assert_eq!(v["refreshing"], json!(false), "{v}");
+}
+
+#[tokio::test]
+async fn background_setting_defaults_off_then_persists_a_toggle() {
+    let h = H::new();
+    h.setup();
+    let (cookie, csrf) = h.session(true);
+
+    // Defaults off.
+    let (s, v) = h
+        .json(with_session(get("/trading/tradefinder/settings"), &cookie, None))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["background_enabled"], json!(false), "{v}");
+
+    // Turning it on persists through the store.
+    let (s2, v2) = h
+        .json(with_session(
+            post_json("/trading/tradefinder/settings", json!({"background_enabled": true})),
+            &cookie,
+            Some(&csrf),
+        ))
+        .await;
+    assert_eq!(s2, StatusCode::OK, "{v2}");
+    assert_eq!(v2["background_enabled"], json!(true), "{v2}");
+
+    let (s3, v3) = h
+        .json(with_session(get("/trading/tradefinder/settings"), &cookie, None))
+        .await;
+    assert_eq!(s3, StatusCode::OK, "{v3}");
+    assert_eq!(v3["background_enabled"], json!(true), "{v3}");
+}

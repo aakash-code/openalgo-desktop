@@ -74,6 +74,38 @@ pub async fn tfsectorscope(State(ctx): Ctx, ClientIp(ip): ClientIp, req: Request
     send(tradefinder_service::sector_scope_reply(&ctx).await)
 }
 
+/// POST /api/v1/tfjwtkeepalive
+///
+/// Reports whether a server-side TradeFinder token is present, so the panel can
+/// show connected/disconnected. The fork also runs a browser-based JWT refresh
+/// here; that needs a headless display Tauri does not have, so it is deferred --
+/// this never refreshes, it only reports. `refreshing` is always false.
+pub async fn tfjwtkeepalive(State(ctx): Ctx, ClientIp(ip): ClientIp, req: Request) -> Response {
+    let body = match read_json_object(req, &()).await {
+        Ok(b) => b,
+        Err(r) => return *r,
+    };
+    // Uses the exclude-unknown schema: the frontend sends `minSeconds`, which
+    // the browser-refresh path (deferred) would read; here it is ignored.
+    if let Err(r) = check(
+        &ctx,
+        ip,
+        &body,
+        schemas::tf_boost_query(),
+        Style::Object,
+        Auth::KeyOnly,
+    )
+    .await
+    {
+        return *r;
+    }
+    send(crate::services::core::Reply::ok(serde_json::json!({
+        "status": "success",
+        "hasToken": tradefinder_service::has_tf_jwt(&ctx),
+        "refreshing": false,
+    })))
+}
+
 /// POST /api/v1/boostmovement
 ///
 /// Current-day rank-movement rows (delta, velocity, acceleration, Top-N,

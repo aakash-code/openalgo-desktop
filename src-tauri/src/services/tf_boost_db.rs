@@ -81,7 +81,34 @@ fn create_tables(c: &duckdb::Connection) -> Result<()> {
             score          DOUBLE,
             created_at     TIMESTAMP DEFAULT current_timestamp,
             UNIQUE (snapshot_time, list_type, symbol)
+         );
+         CREATE TABLE IF NOT EXISTS tf_settings (
+            key    VARCHAR PRIMARY KEY,
+            value  VARCHAR NOT NULL
          );",
+    )?;
+    Ok(())
+}
+
+/// A stored TradeFinder setting, or None if never set. Opens the store on demand
+/// (idempotent) so a setting is readable before the recorder has ever run.
+pub fn read_setting(ctx: &crate::state::AppState, key: &str) -> Result<Option<String>> {
+    let db = init(&ctx.data_dir)?;
+    db.read(|c| {
+        let v: Option<String> = c
+            .query_row("SELECT value FROM tf_settings WHERE key = ?", params![key], |r| r.get(0))
+            .ok();
+        Ok(v)
+    })
+}
+
+/// Store a TradeFinder setting, replacing any earlier value.
+pub fn write_setting(ctx: &crate::state::AppState, key: &str, value: &str) -> Result<()> {
+    let db = init(&ctx.data_dir)?;
+    let c = db.conn()?;
+    c.execute(
+        "INSERT OR REPLACE INTO tf_settings (key, value) VALUES (?, ?)",
+        params![key, value],
     )?;
     Ok(())
 }
