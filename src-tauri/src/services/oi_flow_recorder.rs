@@ -108,6 +108,13 @@ async fn tick(ctx: &Arc<AppState>, now_ist: chrono::NaiveDateTime) -> crate::err
     }
     if !recorded.is_empty() {
         rebuild_watched(&recorded);
+        // Tell open Writer Flow charts/pages a new minute landed, so they
+        // refetch at once rather than waiting for the next 60s poll.
+        for base in &recorded {
+            ctx.ui
+                .emit("writer_flow_update", serde_json::json!({ "underlying": base }))
+                .await;
+        }
     }
     Ok(())
 }
