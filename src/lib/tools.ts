@@ -127,6 +127,13 @@ export const tools: Tool[] = [
     color: 'bg-emerald-500',
   },
   {
+    title: 'Market Read',
+    description:
+      'A once-a-minute plain-English read of what option writers, futures and volatility are doing across the NIFTY chain',
+    href: '/marketread',
+    color: 'bg-emerald-600',
+  },
+  {
     title: 'Arbitrage',
     description:
       'Realtime futures calendar-spread scanner across NFO & MCX, ranked by executable bid/ask spread % with one-click two-leg orders',

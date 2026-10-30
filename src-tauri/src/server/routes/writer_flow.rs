@@ -36,11 +36,15 @@ const READ_SOUND: &str = "market_read_sound";
 
 fn read_settings_json(ctx: &AppState) -> Value {
     let on = |k: &str| oi_flow_db::read_setting(ctx, k).ok().flatten().as_deref() == Some("true");
+    // Shape the frontend's writerFlowApi.readSettings expects: a `settings`
+    // object with `enabled` / `telegram` / `sound`.
     json!({
         "status": "success",
-        "read": on(READ_ENABLED),
-        "telegram": on(READ_TELEGRAM),
-        "sound": on(READ_SOUND),
+        "settings": {
+            "enabled": on(READ_ENABLED),
+            "telegram": on(READ_TELEGRAM),
+            "sound": on(READ_SOUND),
+        },
     })
 }
 
@@ -49,10 +53,10 @@ pub async fn api_read_settings_get(State(ctx): Ctx) -> Response {
     ok(read_settings_json(&ctx))
 }
 
-/// POST /writerflow/api/read/settings -- set any of read / telegram / sound.
+/// POST /writerflow/api/read/settings -- set any of enabled / telegram / sound.
 pub async fn api_read_settings_post(State(ctx): Ctx, JsonBody(body): JsonBody) -> Response {
     for (field, key) in [
-        ("read", READ_ENABLED),
+        ("enabled", READ_ENABLED),
         ("telegram", READ_TELEGRAM),
         ("sound", READ_SOUND),
     ] {

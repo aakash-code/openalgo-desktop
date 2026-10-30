@@ -71,20 +71,20 @@ async fn writerflow_read_settings_round_trip() {
         .json(with_session(get("/writerflow/api/read/settings"), &cookie, None))
         .await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(v["read"], json!(false), "{v}");
+    assert_eq!(v["settings"]["enabled"], json!(false), "{v}");
     // Turn the read on; the answer reflects it.
     let (s2, v2) = h
         .json(with_session(
-            post_json("/writerflow/api/read/settings", json!({"read": true})),
+            post_json("/writerflow/api/read/settings", json!({"enabled": true})),
             &cookie,
             Some(&csrf),
         ))
         .await;
     assert_eq!(s2, StatusCode::OK, "{v2}");
-    assert_eq!(v2["read"], json!(true), "{v2}");
+    assert_eq!(v2["settings"]["enabled"], json!(true), "{v2}");
     // And it persists on a fresh GET.
     let (_s3, v3) = h
         .json(with_session(get("/writerflow/api/read/settings"), &cookie, None))
         .await;
-    assert_eq!(v3["read"], json!(true), "{v3}");
+    assert_eq!(v3["settings"]["enabled"], json!(true), "{v3}");
 }
