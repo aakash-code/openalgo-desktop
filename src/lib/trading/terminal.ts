@@ -47,9 +47,11 @@ import {
   IndicatorInputError,
   type IPrimitive,
   indicatorDefaults,
+  intervalToSeconds,
   isKnownInterval,
   type LtpEvent,
   type MarketDepth,
+  mergeBars,
   OpenAlgoDataFeed,
   OpenAlgoTradeFeed,
   OpenAlgoWsFeed,
@@ -61,6 +63,7 @@ import {
   type ReplayState,
   readChartSettings,
   registeredIndicators,
+  registerIndicator,
   type SeriesApi,
   type SeriesStyle,
   type SeriesType,
@@ -68,6 +71,8 @@ import {
   tryResolveInterval,
   utcSecondsToZonedDateString,
   withBarCache,
+  zonedDayIndex,
+  zonedWeekIndex,
 } from 'openalgo-charts'
 import type {
   DrawingController,
@@ -273,6 +278,12 @@ import {
 } from './drawingScope'
 import { DRAW_TOOL_METADATA } from './drawingToolMetadata'
 import { fmtPrice, money, priceDp, snapTick, tickSize } from './format'
+import {
+  applyTimeframeToAll,
+  hasOwnAttach,
+  safeIntervalSeconds,
+  TF_KEY,
+} from './indicatorTimeframe'
 import { factsFor } from './instrumentFacts'
 import {
   type IntervalData,
@@ -3961,6 +3972,26 @@ export class TradingTerminal {
     // any other way: there is no build step between saving and running, so this
     // toast is the compiler's only route to the person who wrote the mistake.
     for (const err of studies.errors) this.toast(`${err.file}: ${err.message}`, 'err')
+    this.applyIndicatorTimeframe()
+  }
+
+  /**
+   * Give every registered indicator a Timeframe setting (a per-study
+   * timeframe). Last, after every tier has registered, and before a
+   * layout is restored, because an instance keeps the descriptor it was added
+   * with.
+   */
+  private applyIndicatorTimeframe(): void {
+    // Synchronous, so a restore waits no longer than it would without it.
+    applyTimeframeToAll({
+      registeredIndicators,
+      registerIndicator,
+      intervalToSeconds,
+      mergeBars,
+      zonedDayIndex,
+      zonedWeekIndex,
+      IndicatorInputError,
+    })
   }
 
   /**
@@ -3980,7 +4011,7 @@ export class TradingTerminal {
       await import('openalgo-charts/indicators')
       this.indicatorsLoaded = true
     }
-    if (ids.length === 0) return
+    if (ids.length === 0) return this.applyIndicatorTimeframe()
 
     const { ensureCustomIndicators } = await import('./customIndicators')
     const custom = await ensureCustomIndicators(ids, {
@@ -3992,6 +4023,7 @@ export class TradingTerminal {
       const studies = await loadOpenScriptStudies()
       for (const err of studies.errors) this.toast(`${err.file}: ${err.message}`, 'err')
     }
+    this.applyIndicatorTimeframe()
   }
 
   /**
@@ -4683,12 +4715,22 @@ export class TradingTerminal {
       : this.availableIntervals
     // The empty entry is "the chart's own interval", which is how a study says
     // it is not folding at all.
+    // The Timeframe every study gets (indicatorTimeframe.ts) only folds up, so
+    // offer just the intervals above the chart's; a lower one could only ever
+    // produce the warning. A saved lower value still shows, below.
+    let codes = offered
+    if (field.key === TF_KEY) {
+      const chartSec = safeIntervalSeconds(this.interval)
+      if (chartSec !== null) {
+        codes = codes.filter((c) => (safeIntervalSeconds(c) ?? 0) > chartSec)
+      }
+    }
     const options = [
       { label: 'Chart interval', value: '' as unknown },
-      ...offered.map((code) => ({ label: code, value: code as unknown })),
+      ...codes.map((code) => ({ label: code, value: code as unknown })),
     ]
     const current = values[field.key]
-    if (typeof current === 'string' && current !== '' && !offered.includes(current)) {
+    if (typeof current === 'string' && current !== '' && !codes.includes(current)) {
       options.push({ label: current, value: current })
     }
     return { ...field, options }
@@ -5427,7 +5469,8 @@ export class TradingTerminal {
       const inst = chart.addIndicator(indicatorId, {})
       this.syncIndicators()
       if (script) await this.scriptFactsSettled()
-      if (this.chart === chart && chart.indicators().includes(inst)) this.warnIfStarved(inst)
+      if (this.chart === chart && chart.indicators().includes(inst))
+        this.warnIfStarved(inst, getIndicator(indicatorId))
     } catch (e) {
       this.toast(this.cleanError(e), 'err')
     }
@@ -5529,14 +5572,27 @@ export class TradingTerminal {
    * Reading `values()` is safe here: the engine flushes any pending recompute on
    * that call, so this sees the result of the add rather than the frame before.
    */
-  private warnIfStarved(inst: {
-    name: string
-    indicatorId: string
-    values(): Record<string, unknown>
-    series(plotKey: string): unknown
-  }): void {
+  private warnIfStarved(
+    inst: {
+      name: string
+      indicatorId: string
+      values(): Record<string, unknown>
+      series(plotKey: string): unknown
+    },
+    descriptor?: { plots?: readonly { style?: { visible?: boolean } }[]; attach?: unknown }
+  ): void {
     const loaded = this.rawBars.length
     if (!loaded) return
+    // An indicator whose every plot is hidden draws through a primitive (the
+    // OI Profile does): an empty placeholder column is not starvation.
+    const plots = descriptor?.plots
+    if (plots?.length && plots.every((p) => p.style?.visible === false)) return
+    // One that fetches its own data in `attach` has asked for it and cannot
+    // have it yet: this runs straight after the add. Writer Flow Totals drew
+    // its lines a second later, under a toast saying it never would. Asked of
+    // the study, not of the Timeframe wrapper every built-in now wears, or
+    // `sma` on four bars said nothing either.
+    if (hasOwnAttach(descriptor)) return
     const cols = Object.entries(inst.values())
       .filter(([key, col]) => Array.isArray(col) && inst.series(key) !== undefined)
       .map(([, col]) => col as unknown[])
