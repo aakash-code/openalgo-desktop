@@ -57,6 +57,9 @@ const INDEX_URL = '/custom-indicators/index.json'
 // 2.4.0 added two for real, and IndicatorSettingsDialog renders both:
 // 'interval' is a timeframe code the engine can bucket by, and 'time' is a
 // wall-clock string in the chart's zone.
+// 'expiries' is ours, not the library's, and survives that rule because the
+// dialog does draw it: a tick list of the underlying's nearest option expiries,
+// stored as a comma-separated string.
 const INPUT_TYPES = new Set([
   'number',
   'boolean',
@@ -66,6 +69,7 @@ const INPUT_TYPES = new Set([
   'source',
   'interval',
   'time',
+  'expiries',
 ])
 const PLACEMENTS = new Set(['onchart', 'pane'])
 

@@ -1616,6 +1616,7 @@ export function ChartPane({
           <Suspense fallback={null}>
             <IndicatorSettingsDialog
               req={indSettings}
+              symbol={sym?.symbol}
               chartInterval={interval}
               onApply={(id, patch, barSource) =>
                 terminalRef.current?.updateIndicatorSettings(id, patch, barSource)
